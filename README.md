@@ -16,7 +16,7 @@ export OS_TENANT_NAME=example-tenant
 export MINIO_ENDPOINT=s3.amazonaws.com
 export MINIO_ACCESS_KEY_ID=XXXXXXXXXXXXXXXXXXXX
 export MINIO_SECRET_ACCESS_KEY=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-go run main.go -minio-bucket openstack-images -minio-prefix tmp
+glance-proxy -minio-bucket openstack-images -minio-prefix tmp
 ```
 
 Example invocation of qemu-img:
