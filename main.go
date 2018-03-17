@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path"
@@ -20,6 +19,7 @@ import (
 	"github.com/rackspace/gophercloud/openstack"
 	"github.com/rackspace/gophercloud/openstack/compute/v2/images"
 	imageservice "github.com/rackspace/gophercloud/openstack/imageservice/v2/images"
+	log "github.com/sirupsen/logrus"
 )
 
 const bufferSize = 4 * 1024 * 1024
@@ -31,6 +31,12 @@ var minioBucket string
 var minioPrefix string
 var s3c *minio.Client
 var buf []byte
+
+func init() {
+	log.SetFormatter(&log.JSONFormatter{})
+	log.SetOutput(os.Stderr)
+	log.SetLevel(log.WarnLevel)
+}
 
 func main() {
 	var err error
@@ -44,47 +50,59 @@ func main() {
 	minioSecretAccessKey := os.Getenv("MINIO_SECRET_ACCESS_KEY")
 
 	if minioEndpoint == "" {
-		log.Fatalf("Please set MINIO_ENDPOINT environment variable to an S3 endpoint to use for temporary image storage")
+		log.Fatal("Please set MINIO_ENDPOINT environment variable to an S3 endpoint to use for temporary image storage")
 		return
 	}
 
 	if minioAccessKeyId == "" {
-		log.Printf("WARNING: MINIO_ACCESS_KEY_ID was not set or empty, S3 authentication may fail\n")
+		log.Print("WARNING: MINIO_ACCESS_KEY_ID was not set or empty, S3 authentication may fail")
 	}
 
 	if minioSecretAccessKey == "" {
-		log.Printf("WARNING: MINIO_SECRET_ACCESS_KEY was not set or empty, S3 authentication may fail\n")
+		log.Print("WARNING: MINIO_SECRET_ACCESS_KEY was not set or empty, S3 authentication may fail")
 	}
 
 	// Use a secure connection
 	minioSsl := true
 
+	minioLog := log.WithFields(log.Fields{
+		"endpoint":   minioEndpoint,
+		"access_key": minioAccessKeyId,
+	})
 	// Initialize minio client object.
 	s3c, err = minio.New(minioEndpoint, minioAccessKeyId, minioSecretAccessKey, minioSsl)
 	if err != nil {
-		log.Fatalf("Failed to initialize minio using endpoint %s and access key id %s: %s\n", minioEndpoint, minioAccessKeyId, err)
+		minioLog.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("Failed to initialize minio")
 		return
 	}
 
 	exists, err := s3c.BucketExists(minioBucket)
 	if err != nil {
-		log.Fatalf("Error checking for existence of bucket %s at S3 endpoint %s: %s", minioBucket, minioEndpoint, err)
+		minioLog.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("Error checking for existence of bucket")
 		return
 	}
 	if !exists {
-		log.Fatalf("Bucket %s does not exist at S3 endpoint %s", minioBucket, minioEndpoint)
+		minioLog.Fatal("Bucket does not exist")
 		return
 	}
 
 	opts, err := openstack.AuthOptionsFromEnv()
 	if err != nil {
-		log.Fatalf("Failed to get openstack auth options from environment: %s\n", err)
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("Failed to get openstack auth options from environment")
 		return
 	}
 
 	provider, err := openstack.AuthenticatedClient(opts)
 	if err != nil {
-		log.Fatalf("Failed to authenticate to openstack: %s\n", err)
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("Failed to authenticate to openstack")
 		return
 	}
 
@@ -93,7 +111,9 @@ func main() {
 		Region: "regionOne",
 	})
 	if err != nil {
-		log.Fatalf("Failed to initialize openstack compute v2 provider: %s\n", err)
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("Failed to initialize openstack compute v2 provider")
 		return
 	}
 
@@ -101,7 +121,9 @@ func main() {
 		Region: "regionOne",
 	})
 	if err != nil {
-		log.Fatalf("Failed to initialize openstack image service v2 provider: %s\n", err)
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Fatal("Failed to initialize openstack image service v2 provider")
 		return
 	}
 
@@ -118,19 +140,28 @@ func main() {
 		WriteTimeout:   300 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
-	log.Fatal(srv.ListenAndServe())
+	err = srv.ListenAndServe()
+	log.WithFields(log.Fields{
+		"error": err,
+	}).Fatal("ListenAndServe error")
 	return
 }
 
 func httpErrorLog(w http.ResponseWriter, error string, code int) {
 	http.Error(w, error, code)
-	log.Printf("ERROR (%d): %s\n", code, error)
+	log.WithFields(log.Fields{
+		"code":  code,
+		"error": error,
+	}).Error("Returned http error")
 	return
 }
 
 func namedImageHandler(w http.ResponseWriter, r *http.Request) {
 	imageName := mux.Vars(r)["image_name"]
-	log.Printf("%s request for image named %s\n", r.Method, imageName)
+	log.WithFields(log.Fields{
+		"method":    r.Method,
+		"imageName": imageName,
+	}).Info("Request for image by name")
 
 	imageId, err := images.IDFromName(computeClient, imageName)
 	if err != nil {
@@ -143,7 +174,10 @@ func namedImageHandler(w http.ResponseWriter, r *http.Request) {
 
 func idImageHandler(w http.ResponseWriter, r *http.Request) {
 	imageId := mux.Vars(r)["image_id"]
-	log.Printf("%s request for image id %s\n", r.Method, imageId)
+	log.WithFields(log.Fields{
+		"method":   r.Method,
+		"image_id": imageId,
+	}).Info("Request for image by id")
 
 	handleImage(w, r, imageId)
 }
@@ -161,11 +195,17 @@ func handleImage(w http.ResponseWriter, r *http.Request, imageId string) {
 
 func deleteImage(w http.ResponseWriter, r *http.Request, imageId string) {
 	var err error
+	log.WithFields(log.Fields{
+		"image_id": imageId,
+	}).Info("Deleting image from S3")
 	err = deleteImageFromS3(imageId)
 	if err != nil {
 		httpErrorLog(w, fmt.Sprintf("Failed to delete image %s from S3: %s", imageId, err), http.StatusBadGateway)
 		return
 	}
+	// log.WithFields(log.Fields{
+	// 	"image_id": imageId,
+	// }).Info("Deleting image from Glance")
 	// err = deleteImageFromGlance(imageId)
 	// if err != nil {
 	// 	httpErrorLog(w, fmt.Sprintf("Failed to delete image %s from Glance: %s", imageId, err), http.StatusBadGateway)
@@ -178,7 +218,9 @@ func deleteImage(w http.ResponseWriter, r *http.Request, imageId string) {
 func deleteImageFromGlance(imageId string) error {
 	res := imageservice.Delete(imageClient, imageId)
 	if res.Err == nil {
-		log.Printf("Removed image %s from Glance\n", imageId)
+		log.WithFields(log.Fields{
+			"image_id": imageId,
+		}).Info("Removed image from Glance")
 	}
 	return res.Err
 }
@@ -187,7 +229,10 @@ func deleteImageFromS3(imageId string) (err error) {
 	imagePath := path.Join(minioPrefix, imageId)
 	err = s3c.RemoveObject(minioBucket, imagePath)
 	if err == nil {
-		log.Printf("Removed image %s/%s from S3\n", minioBucket, imagePath)
+		log.WithFields(log.Fields{
+			"bucket": minioBucket,
+			"object": imagePath,
+		}).Info("Removed image from S3")
 	}
 	return
 }
@@ -208,12 +253,14 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 
 	imageSize := int64(image.SizeBytes)
 	if imageSize <= 0 {
-		log.Printf("WARNING: returning empty content for image with Size <= 0: %s\n", imageSize)
+		log.WithFields(log.Fields{
+			"image_size": imageSize,
+		}).Warning("Returning empty content for image with Size <= 0")
 		return
 	}
 
 	if image.Checksum == "" {
-		log.Printf("WARNING: image has no checksum in glance\n")
+		log.Info("Image has no checksum in glance")
 	}
 
 	// default to the entire image when Range not requested
@@ -263,7 +310,11 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 			} else {
 				offset, err = strconv.ParseInt(startSpec, 10, 64)
 				if err != nil {
-					log.Printf("WARNING: %s\n", fmt.Sprintf("Invalid Range (start position '%s' could not be parsed as an integer): %s", rangeHeader, err))
+					log.WithFields(log.Fields{
+						"range":      rangeHeader,
+						"start_spec": startSpec,
+						"error":      err,
+					}).Warning("Invalid Range (start specification could not be parsed as an integer)")
 					return
 				}
 				if offset < 0 {
@@ -295,7 +346,13 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 			}
 		}
 		contentRange := fmt.Sprintf("bytes %d-%d/%d", offset, offset+length-1, imageSize)
-		log.Printf("Range: %s will read at offset %d for %d bytes out of %d (Content-Range: %s)\n", rangeHeader, offset, length, imageSize, contentRange)
+		log.WithFields(log.Fields{
+			"range":         rangeHeader,
+			"offset":        offset,
+			"length":        length,
+			"image_size":    imageSize,
+			"content_range": contentRange,
+		}).Info("Range request")
 		w.Header().Set("Content-Range", contentRange)
 		statusCode = http.StatusPartialContent
 	} else {
@@ -306,7 +363,11 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 	imagePath := path.Join(minioPrefix, imageId)
 	imageObjInfo, err := s3c.StatObject(minioBucket, imagePath, minio.StatObjectOptions{})
 	if err != nil {
-		log.Printf("Failed to stat S3 object %s/%s: %s\n", minioBucket, imagePath, err)
+		log.WithFields(log.Fields{
+			"bucket": minioBucket,
+			"object": imagePath,
+			"error":  err,
+		}).Info("Failed to stat S3 object, it probably does not exist")
 		// prepare to download image from glance
 		imageReader, err := imageservice.Download(imageClient, imageId).Extract()
 		if err != nil {
@@ -317,7 +378,11 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 		glanceHashWriter := md5.New()
 		hashingImageReader := io.TeeReader(imageReader, glanceHashWriter)
 
-		log.Printf("Attempting to upload image from glance to S3: %s/%s\n", minioBucket, imagePath)
+		log.WithFields(log.Fields{
+			"bucket": minioBucket,
+			"object": imagePath,
+			"error":  err,
+		}).Info("Attempting to upload image from glance to S3")
 		written, err := s3c.PutObject(minioBucket, imagePath, hashingImageReader, imageSize, minio.PutObjectOptions{ContentType: "application/x-raw-disk-image"})
 		if err != nil {
 			httpErrorLog(w, fmt.Sprintf("Failed to transfer image %s from glance to S3 %s/%s: %s\n", imageId, minioBucket, imagePath, err), http.StatusBadGateway)
@@ -332,9 +397,17 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 		glanceMd5 := hex.EncodeToString(glanceHashWriter.Sum(nil))
 		if image.Checksum != "" {
 			if image.Checksum != glanceMd5 {
-				log.Printf("ERROR: checksum mismatch for image %s, glance reported checksum %s but we received md5 %s\n", imageId, image.Checksum, glanceMd5)
+				log.WithFields(log.Fields{
+					"image_id":                 imageId,
+					"image_checksum":           image.Checksum,
+					"received_from_glance_md5": glanceMd5,
+				}).Error("Checksum mismatch for image between image checksum and MD5 of data received from glance")
 			} else {
-				log.Printf("Checksum verified md5{%s} for image %s\n", glanceMd5, imageId)
+				log.WithFields(log.Fields{
+					"image_id":                 imageId,
+					"image_checksum":           image.Checksum,
+					"received_from_glance_md5": glanceMd5,
+				}).Info("Checksum verified for image")
 			}
 		}
 
@@ -359,7 +432,11 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 			// delete from S3
 			err = deleteImageFromS3(imageId)
 			if err != nil {
-				log.Printf("ERROR: failed to remove S3 image object %s/%s: %s", minioBucket, imagePath, err)
+				log.WithFields(log.Fields{
+					"bucket": minioBucket,
+					"object": imagePath,
+					"error":  err,
+				}).Error("Failed to remove S3 image object")
 			}
 			return
 		}
@@ -368,7 +445,11 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 			// delete from S3
 			err = deleteImageFromS3(imageId)
 			if err != nil {
-				log.Printf("ERROR: failed to remove S3 image object %s/%s: %s", minioBucket, imagePath, err)
+				log.WithFields(log.Fields{
+					"bucket": minioBucket,
+					"object": imagePath,
+					"error":  err,
+				}).Error("Failed to remove S3 image object")
 			}
 			return
 		}
@@ -378,7 +459,11 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 			// delete from S3
 			err = deleteImageFromS3(imageId)
 			if err != nil {
-				log.Printf("ERROR: failed to remove S3 image object %s/%s: %s", minioBucket, imagePath, err)
+				log.WithFields(log.Fields{
+					"bucket": minioBucket,
+					"object": imagePath,
+					"error":  err,
+				}).Error("Failed to remove S3 image object")
 			}
 			return
 		} else {
@@ -392,7 +477,11 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 		// delete from S3
 		err = deleteImageFromS3(imageId)
 		if err != nil {
-			log.Printf("ERROR: failed to remove S3 image object %s/%s: %s", minioBucket, imagePath, err)
+			log.WithFields(log.Fields{
+				"bucket": minioBucket,
+				"object": imagePath,
+				"error":  err,
+			}).Error("Failed to remove S3 image object")
 		}
 	}
 
@@ -426,10 +515,17 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 	w.WriteHeader(statusCode)
 	written, err := io.CopyBuffer(w, imageReader, buf)
 	if err != nil {
-		log.Printf("WARNING: %s\n", fmt.Sprintf("Error transmitting image %s from glance to client: %s", imageId, err))
+		log.WithFields(log.Fields{
+			"image_id": imageId,
+			"error":    err,
+		}).Warning("Error transmitting image from S3 to client")
 		return
 	}
-	log.Printf("Wrote %d bytes starting at offset %d (requested %d)\n", written, offset, length)
+	log.WithFields(log.Fields{
+		"bytes_written": written,
+		"offset":        offset,
+		"length":        length,
+	}).Info("Finished transmitting image from S3 to client")
 
 	return
 }
