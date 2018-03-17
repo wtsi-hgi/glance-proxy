@@ -40,10 +40,20 @@ func init() {
 
 func main() {
 	var err error
-
+	var logLevelStr string
 	flag.StringVar(&minioBucket, "minio-bucket", "glance-proxy", "S3 bucket to use for temporary image storage")
 	flag.StringVar(&minioPrefix, "minio-prefix", "tmp", "Path prefix within bucket to use for temporary image storage")
+	flag.StringVar(&logLevelStr, "log-level", "warn", "Log level (one of panic, fatal, error, warn, info, debug)")
 	flag.Parse()
+
+	logLevel, err := log.ParseLevel(logLevelStr)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"log_level": logLevelStr,
+			"error":     err,
+		}).Fatal("Error parsing log level")
+	}
+	log.SetLevel(logLevel)
 
 	minioEndpoint := os.Getenv("MINIO_ENDPOINT")
 	minioAccessKeyId := os.Getenv("MINIO_ACCESS_KEY_ID")
