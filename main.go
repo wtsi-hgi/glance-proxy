@@ -166,11 +166,11 @@ func deleteImage(w http.ResponseWriter, r *http.Request, imageId string) {
 		httpErrorLog(w, fmt.Sprintf("Failed to delete image %s from S3: %s", imageId, err), http.StatusBadGateway)
 		return
 	}
-	err = deleteImageFromGlance(imageId)
-	if err != nil {
-		httpErrorLog(w, fmt.Sprintf("Failed to delete image %s from Glance: %s", imageId, err), http.StatusBadGateway)
-		return
-	}
+	// err = deleteImageFromGlance(imageId)
+	// if err != nil {
+	// 	httpErrorLog(w, fmt.Sprintf("Failed to delete image %s from Glance: %s", imageId, err), http.StatusBadGateway)
+	// 	return
+	// }
 	w.WriteHeader(http.StatusNoContent)
 	return
 }
