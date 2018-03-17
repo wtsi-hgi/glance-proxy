@@ -108,8 +108,8 @@ func main() {
 	buf = make([]byte, bufferSize)
 
 	router := mux.NewRouter()
-	router.HandleFunc("/id/{image_id}", idImageHandler).Methods("GET", "HEAD")
-	router.HandleFunc("/name/{image_name}", namedImageHandler).Methods("GET", "HEAD")
+	router.HandleFunc("/id/{image_id}", idImageHandler).Methods("GET", "HEAD", "DELETE")
+	router.HandleFunc("/name/{image_name}", namedImageHandler).Methods("GET", "HEAD", "DELETE")
 
 	srv := &http.Server{
 		Addr:           "127.0.0.1:8080",
@@ -138,14 +138,58 @@ func namedImageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	getImage(w, r, imageId)
+	handleImage(w, r, imageId)
 }
 
 func idImageHandler(w http.ResponseWriter, r *http.Request) {
 	imageId := mux.Vars(r)["image_id"]
 	log.Printf("%s request for image id %s\n", r.Method, imageId)
 
-	getImage(w, r, imageId)
+	handleImage(w, r, imageId)
+}
+
+func handleImage(w http.ResponseWriter, r *http.Request, imageId string) {
+	switch m := r.Method; m {
+	case "GET":
+		getImage(w, r, imageId)
+	case "HEAD":
+		getImage(w, r, imageId)
+	case "DELETE":
+		deleteImage(w, r, imageId)
+	}
+}
+
+func deleteImage(w http.ResponseWriter, r *http.Request, imageId string) {
+	var err error
+	err = deleteImageFromS3(imageId)
+	if err != nil {
+		httpErrorLog(w, fmt.Sprintf("Failed to delete image %s from S3: %s", imageId, err), http.StatusBadGateway)
+		return
+	}
+	err = deleteImageFromGlance(imageId)
+	if err != nil {
+		httpErrorLog(w, fmt.Sprintf("Failed to delete image %s from Glance: %s", imageId, err), http.StatusBadGateway)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return
+}
+
+func deleteImageFromGlance(imageId string) error {
+	res := imageservice.Delete(imageClient, imageId)
+	if res.Err == nil {
+		log.Printf("Removed image %s from Glance\n", imageId)
+	}
+	return res.Err
+}
+
+func deleteImageFromS3(imageId string) (err error) {
+	imagePath := path.Join(minioPrefix, imageId)
+	err = s3c.RemoveObject(minioBucket, imagePath)
+	if err == nil {
+		log.Printf("Removed image %s/%s from S3\n", minioBucket, imagePath)
+	}
+	return
 }
 
 func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
@@ -169,7 +213,7 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 	}
 
 	if image.Checksum == "" {
-		log.Printf("WARNING: image has no checksum in glance, disabling checksum verification\n")
+		log.Printf("WARNING: image has no checksum in glance\n")
 	}
 
 	// default to the entire image when Range not requested
@@ -313,32 +357,29 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 		if err != nil {
 			httpErrorLog(w, fmt.Sprintf("Failed to download image %s/%s from S3 to verify md5: %s", minioBucket, imagePath, err), http.StatusBadGateway)
 			// delete from S3
-			err = s3c.RemoveObject(minioBucket, imagePath)
+			err = deleteImageFromS3(imageId)
 			if err != nil {
 				log.Printf("ERROR: failed to remove S3 image object %s/%s: %s", minioBucket, imagePath, err)
 			}
-			log.Printf("Removed image %s/%s from S3\n", minioBucket, imagePath)
 			return
 		}
 		if verified != imageSize {
 			httpErrorLog(w, fmt.Sprintf("Image %s/%s is %d bytes but received %d bytes from S3 for verification: %s", minioBucket, imagePath, imageSize, verified), http.StatusBadGateway)
 			// delete from S3
-			err = s3c.RemoveObject(minioBucket, imagePath)
+			err = deleteImageFromS3(imageId)
 			if err != nil {
 				log.Printf("ERROR: failed to remove S3 image object %s/%s: %s", minioBucket, imagePath, err)
 			}
-			log.Printf("Removed image %s/%s from S3\n", minioBucket, imagePath)
 			return
 		}
 		s3Md5 := hex.EncodeToString(s3Md5Writer.Sum(nil))
 		if s3Md5 != glanceMd5 {
 			httpErrorLog(w, fmt.Sprintf("Image %s/%s checksum mismatch, uploaded %s to S3 but received %s back\n", minioBucket, imagePath, glanceMd5, s3Md5), http.StatusBadGateway)
 			// delete from S3
-			err = s3c.RemoveObject(minioBucket, imagePath)
+			err = deleteImageFromS3(imageId)
 			if err != nil {
 				log.Printf("ERROR: failed to remove S3 image object %s/%s: %s", minioBucket, imagePath, err)
 			}
-			log.Printf("Removed image %s/%s from S3\n", minioBucket, imagePath)
 			return
 		} else {
 			log.Printf("Checksum verified md5{%s} for image %s\n", glanceMd5, imageId)
@@ -349,11 +390,10 @@ func getImage(w http.ResponseWriter, r *http.Request, imageId string) {
 	if imageSize != imageObjInfo.Size {
 		httpErrorLog(w, fmt.Sprintf("Size mismatch, glance reports size %d but S3 has size %d", imageSize, imageObjInfo.Size), http.StatusBadGateway)
 		// delete from S3
-		err = s3c.RemoveObject(minioBucket, imagePath)
+		err = deleteImageFromS3(imageId)
 		if err != nil {
 			log.Printf("ERROR: failed to remove S3 image object %s/%s: %s", minioBucket, imagePath, err)
 		}
-		log.Printf("Removed image %s/%s from S3\n", minioBucket, imagePath)
 	}
 
 	// FIXME this check does not work because large files in S3 don't have simple MD5 ETag
